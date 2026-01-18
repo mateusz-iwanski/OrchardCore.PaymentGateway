@@ -5,8 +5,8 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using OrchardCore.Modules;
 using Refit;
-using ApiClientPrzelewy24.Clients;
 using ApiClientPrzelewy24.Services;
+using ApiClientPrzelewy24.Clients;
 
 namespace ApiClientPrzelewy24
 {
@@ -22,7 +22,7 @@ namespace ApiClientPrzelewy24
                     if (!baseUrl.EndsWith('/')) baseUrl += '/';
                     client.BaseAddress = new Uri(baseUrl);
                 })
-                .AddHttpMessageHandler<ApiClientPrzelewy24.Clients.Przelewy24LoggingHandler>();
+                .AddHttpMessageHandler<Przelewy24LoggingHandler>();
 
             services.AddRefitClient<IPrzelewy24Api>()
                 .ConfigureHttpClient((sp, client) =>
@@ -34,7 +34,7 @@ namespace ApiClientPrzelewy24
                 });
 
             services.AddSingleton<IPrzelewy24SignatureProvider, Przelewy24SignatureProvider_Default>();
-            services.AddTransient<ApiClientPrzelewy24.Clients.Przelewy24LoggingHandler>();
+            services.AddTransient<Przelewy24LoggingHandler>();
             services.AddTransient<Przelewy24Service>();
         }
 
