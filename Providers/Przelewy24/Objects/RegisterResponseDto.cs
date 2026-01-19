@@ -1,6 +1,6 @@
 ﻿using System.Text.Json.Serialization;
 
-namespace ApiClientPrzelewy24.Objects
+namespace OrchardCore.PaymentGateway.Providers.Przelewy24.Objects
 {
     /// <summary>
     /// Odpowiedź z Przelewy24 po rejestracji transakcji

@@ -1,4 +1,4 @@
-namespace ApiClientPrzelewy24.Objects
+namespace OrchardCore.PaymentGateway.Providers.Przelewy24.Objects
 {
     /// <summary>
     /// ¯¹danie p³atnoœci kart¹ z bezpoœrednimi danymi (wymaga PCI DSS)

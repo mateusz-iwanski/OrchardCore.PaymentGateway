@@ -1,4 +1,4 @@
-namespace ApiClientPrzelewy24.Objects
+namespace OrchardCore.PaymentGateway.Providers.Przelewy24.Objects
 {
     /// <summary>
     /// ¯¹danie p³atnoœci kodem BLIK (6-cyfrowy kod)

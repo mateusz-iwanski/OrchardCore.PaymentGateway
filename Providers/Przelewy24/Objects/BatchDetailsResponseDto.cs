@@ -1,6 +1,6 @@
 using System.Collections.Generic;
 
-namespace ApiClientPrzelewy24.Objects
+namespace OrchardCore.PaymentGateway.Providers.Przelewy24.Objects
 {
     /// <summary>
     /// Szczegó³y paczki (batch) z Przelewy24

@@ -1,4 +1,4 @@
-namespace ApiClientPrzelewy24.Objects
+namespace OrchardCore.PaymentGateway.Providers.Przelewy24.Objects
 {
     /// <summary>
     /// ¯¹danie zwrotu œrodków w Przelewy24

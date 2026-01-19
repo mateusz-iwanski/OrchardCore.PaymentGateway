@@ -1,4 +1,4 @@
-namespace ApiClientPrzelewy24.Objects
+namespace OrchardCore.PaymentGateway.Providers.Przelewy24.Objects
 {
     /// <summary>
     /// ¯¹danie p³atnoœci aliasem BLIK (1-click)

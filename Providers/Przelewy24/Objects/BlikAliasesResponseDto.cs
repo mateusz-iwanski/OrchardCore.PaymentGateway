@@ -1,6 +1,6 @@
 using System.Collections.Generic;
 
-namespace ApiClientPrzelewy24.Objects
+namespace OrchardCore.PaymentGateway.Providers.Przelewy24.Objects
 {
     /// <summary>
     /// Lista aliasów BLIK dla adresu email

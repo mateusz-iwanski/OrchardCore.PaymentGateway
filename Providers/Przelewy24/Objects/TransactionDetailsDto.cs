@@ -1,4 +1,4 @@
-namespace ApiClientPrzelewy24.Objects
+namespace OrchardCore.PaymentGateway.Providers.Przelewy24.Objects
 {
     /// <summary>
     /// Szczegó³y transakcji z Przelewy24

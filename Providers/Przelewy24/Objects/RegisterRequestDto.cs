@@ -1,6 +1,6 @@
 ﻿using System.Text.Json.Serialization;
 
-namespace ApiClientPrzelewy24.Objects
+namespace OrchardCore.PaymentGateway.Providers.Przelewy24.Objects
 {
     // DTO zgodne z dokumentacją Przelewy24 reprezentujące parametry wymagane przy rejestracji transakcji.
     // Każde pole odpowiada jednej pozycji formularza wysyłanego do endpointu `transaction/register`.
