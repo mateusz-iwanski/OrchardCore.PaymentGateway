@@ -1,10 +1,10 @@
 //using Microsoft.Extensions.DependencyInjection;
 //using Refit;
 //using System;
-//using ApiClientPrzelewy24.Clients;
+//using OrchardCore.PaymentGateway.Clients;
 //using Microsoft.Extensions.Http; // Add this if needed for IHttpClientBuilder
 
-//namespace ApiClientPrzelewy24.Extensions
+//namespace OrchardCore.PaymentGateway.Extensions
 //{
 //    public static class ServiceCollectionExtensionsRefit
 //    {
