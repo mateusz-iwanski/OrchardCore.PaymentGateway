@@ -5,12 +5,13 @@ using System.Text;
 using System.Text.Json;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Configuration;
-using Refit;
-using System.Net.Http.Headers;
-using System.Threading;
 using Microsoft.Extensions.Logging;
+using OrchardCore.Entities;
+using OrchardCore.Settings;
 using OrchardCore.PaymentGateway.Providers.Przelewy24.Objects;
+using OrchardCore.PaymentGateway.Providers.Przelewy24.Settings;
 using OrchardCore.PaymentGateway.Providers.Przelewy24.Clients;
+using System.Net.Http.Headers;
 
 namespace OrchardCore.PaymentGateway.Providers.Przelewy24.Services
 {
@@ -62,22 +63,101 @@ namespace OrchardCore.PaymentGateway.Providers.Przelewy24.Services
         private readonly IConfiguration _configuration;
         private readonly IPrzelewy24SignatureProvider _signatureProvider;
         private readonly ILogger<Przelewy24Service> _logger;
+        private readonly ISiteService? _siteService;
 
         // Fallbacks for local testing only - REPLACE IN PRODUCTION!
         private const string SandboxCrcKey = "yourSandboxCrcKey";
         private const string SandboxReportKey = "yourSandboxReportKey";
+        private const string SandboxBaseUrl = "https://sandbox.przelewy24.pl/api/v1/";
 
         public Przelewy24Service(
             IHttpClientFactory httpClientFactory,
             IConfiguration configuration,
             IPrzelewy24SignatureProvider signatureProvider,
-            ILogger<Przelewy24Service> logger)
+            ILogger<Przelewy24Service> logger,
+            ISiteService? siteService = null)
         {
             _httpClientFactory = httpClientFactory;
             _configuration = configuration;
             _signatureProvider = signatureProvider;
             _logger = logger;
+            _siteService = siteService;
         }
+
+        #region Settings helpers
+
+        private async Task<Przelewy24Settings> GetSettingsAsync()
+        {
+            Przelewy24Settings? siteSettings = null;
+
+            if (_siteService is not null)
+            {
+                var site = await _siteService.GetSiteSettingsAsync().ConfigureAwait(false);
+                siteSettings = site.As<Przelewy24Settings>();
+            }
+
+            var merchantId = siteSettings?.MerchantId
+                             ?? _configuration.GetValue<int?>("Przelewy24:MerchantId")
+                             ?? _configuration.GetValue<int?>("Przelewy24:ClientId");
+
+            var posId = siteSettings?.PosId
+                        ?? _configuration.GetValue<int?>("Przelewy24:PosId")
+                        ?? merchantId;
+
+            var crc = string.IsNullOrWhiteSpace(siteSettings?.CrcKey)
+                ? _configuration["Przelewy24:CrcKey"]
+                : siteSettings!.CrcKey;
+
+            var reportKey = string.IsNullOrWhiteSpace(siteSettings?.ReportKey)
+                ? _configuration["Przelewy24:ReportKey"]
+                : siteSettings!.ReportKey;
+
+            var secretId = string.IsNullOrWhiteSpace(siteSettings?.SecretId)
+                ? _configuration["Przelewy24:SecretId"]
+                : siteSettings!.SecretId;
+
+            var baseUrl = string.IsNullOrWhiteSpace(siteSettings?.BaseUrl)
+                ? _configuration["Przelewy24:BaseUrl"]
+                : siteSettings!.BaseUrl;
+
+            var useSandbox = siteSettings?.UseSandboxFallbacks ?? true;
+
+            return new Przelewy24Settings
+            {
+                ClientId = siteSettings?.ClientId ?? _configuration["Przelewy24:ClientId"],
+                MerchantId = merchantId,
+                PosId = posId,
+                CrcKey = !string.IsNullOrWhiteSpace(crc) ? crc : (useSandbox ? SandboxCrcKey : null),
+                ReportKey = !string.IsNullOrWhiteSpace(reportKey) ? reportKey : (useSandbox ? SandboxReportKey : null),
+                SecretId = !string.IsNullOrWhiteSpace(secretId) ? secretId : null,
+                BaseUrl = !string.IsNullOrWhiteSpace(baseUrl) ? EnsureTrailingSlash(baseUrl) : EnsureTrailingSlash(SandboxBaseUrl),
+                UseSandboxFallbacks = useSandbox
+            };
+        }
+
+        private static string EnsureTrailingSlash(string url) =>
+            url.EndsWith('/') ? url : url + "/";
+
+        private async Task<HttpClient> CreateAuthenticatedClientAsync(Przelewy24Settings settings)
+        {
+            var client = _httpClientFactory.CreateClient("Przelewy24");
+            client.BaseAddress ??= new Uri(settings.BaseUrl ?? SandboxBaseUrl);
+
+            var reportKey = settings.SecretId ?? settings.ReportKey ?? throw new InvalidOperationException("Przelewy24:ReportKey/SecretId not configured.");
+            var posId = settings.PosId?.ToString() ?? settings.MerchantId?.ToString();
+
+            if (string.IsNullOrWhiteSpace(posId))
+            {
+                throw new InvalidOperationException("Przelewy24:PosId or MerchantId not configured.");
+            }
+
+            var authBytes = Encoding.UTF8.GetBytes($"{posId}:{reportKey}");
+            client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Basic", Convert.ToBase64String(authBytes));
+
+            return client;
+        }
+
+        #endregion
 
         #region Test & Basic Operations
 
@@ -99,22 +179,23 @@ namespace OrchardCore.PaymentGateway.Providers.Przelewy24.Services
         /// </remarks>
         public async Task<string> TestAccessAsync(string? posId = null, string? secretId = null)
         {
-            var cfgPosId = posId ?? _configuration["Przelewy24:PosId"] ?? _configuration["Przelewy24:MerchantId"];
-            var cfgSecret = secretId ?? _configuration["Przelewy24:SecretId"] ?? _configuration["Przelewy24:ReportKey"] ?? SandboxReportKey;
+            var settings = await GetSettingsAsync().ConfigureAwait(false);
+
+            var cfgPosId = posId ?? settings.PosId?.ToString() ?? settings.MerchantId?.ToString();
+            var cfgSecret = secretId ?? settings.SecretId ?? settings.ReportKey;
 
             if (string.IsNullOrWhiteSpace(cfgPosId))
-                throw new InvalidOperationException("Przelewy24:PosId not configured and not provided.");
+                throw new InvalidOperationException("PosId not configured and not provided.");
 
             if (string.IsNullOrWhiteSpace(cfgSecret))
-                throw new InvalidOperationException("Przelewy24:SecretId/ReportKey not configured and not provided.");
+                throw new InvalidOperationException("SecretId/ReportKey not configured and not provided.");
 
-            var client = _httpClientFactory.CreateClient("Przelewy24");
-
-            var authBytes = System.Text.Encoding.UTF8.GetBytes($"{cfgPosId}:{cfgSecret}");
+            var client = await CreateAuthenticatedClientAsync(settings).ConfigureAwait(false);
+            var authBytes = Encoding.UTF8.GetBytes($"{cfgPosId}:{cfgSecret}");
             var authHeader = Convert.ToBase64String(authBytes);
 
             var request = new HttpRequestMessage(HttpMethod.Get, "testAccess");
-            request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Basic", authHeader);
+            request.Headers.Authorization = new AuthenticationHeaderValue("Basic", authHeader);
 
             using var resp = await client.SendAsync(request).ConfigureAwait(false);
             var content = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
@@ -163,8 +244,13 @@ namespace OrchardCore.PaymentGateway.Providers.Przelewy24.Services
         {
             if (request is null) throw new ArgumentNullException(nameof(request));
 
-            var crc = _configuration["Przelewy24:CrcKey"] ?? SandboxCrcKey;
-            if (string.IsNullOrWhiteSpace(crc))
+            var settings = await GetSettingsAsync().ConfigureAwait(false);
+
+            if (settings.MerchantId is null)
+                throw new InvalidOperationException("Przelewy24 MerchantId not configured.");
+            if (settings.PosId is null)
+                throw new InvalidOperationException("Przelewy24 PosId not configured.");
+            if (string.IsNullOrWhiteSpace(settings.CrcKey))
                 throw new InvalidOperationException("Przelewy24 CRC key not configured.");
 
             if (string.IsNullOrWhiteSpace(request.SessionId))
@@ -172,18 +258,16 @@ namespace OrchardCore.PaymentGateway.Providers.Przelewy24.Services
                 request = request with { SessionId = Guid.NewGuid().ToString("N") };
             }
 
-            var sign = await _signatureProvider.CreateRegisterSignatureAsync(request, crc).ConfigureAwait(false);
-            var signedRequest = request with { Sign = sign };
+            var normalizedRequest = request with
+            {
+                MerchantId = request.MerchantId == 0 ? settings.MerchantId.Value : request.MerchantId,
+                PosId = request.PosId == 0 ? settings.PosId.Value : request.PosId
+            };
 
-                var client = _httpClientFactory.CreateClient("Przelewy24");
+            var sign = await _signatureProvider.CreateRegisterSignatureAsync(normalizedRequest, settings.CrcKey!).ConfigureAwait(false);
+            var signedRequest = normalizedRequest with { Sign = sign };
 
-            var reportKey = _configuration["Przelewy24:ReportKey"] ?? SandboxReportKey;
-            var posForAuth = request.PosId != 0
-                ? request.PosId.ToString()
-                : (_configuration["Przelewy24:PosId"] ?? request.MerchantId.ToString());
-
-            var authBytes = Encoding.UTF8.GetBytes($"{posForAuth}:{reportKey}");
-            client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Basic", Convert.ToBase64String(authBytes));
+            var client = await CreateAuthenticatedClientAsync(settings).ConfigureAwait(false);
 
             var form = new Dictionary<string, string?>
             {
@@ -210,11 +294,7 @@ namespace OrchardCore.PaymentGateway.Providers.Przelewy24.Services
                 throw new InvalidOperationException($"Przelewy24 returned {(int)responseMessage.StatusCode}. Response content: {responseContent}");
             }
 
-            var dto = JsonSerializer.Deserialize<RegisterResponseDto>(responseContent, new JsonSerializerOptions
-            {
-                PropertyNameCaseInsensitive = true
-            });
-
+            var dto = JsonSerializer.Deserialize<RegisterResponseDto>(responseContent, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
             return dto ?? throw new InvalidOperationException("Failed to deserialize Przelewy24 response.");
         }
 
@@ -250,19 +330,16 @@ namespace OrchardCore.PaymentGateway.Providers.Przelewy24.Services
         {
             if (request is null) throw new ArgumentNullException(nameof(request));
 
-            var crc = _configuration["Przelewy24:CrcKey"] ?? SandboxCrcKey;
-            if (string.IsNullOrWhiteSpace(crc))
+            var settings = await GetSettingsAsync().ConfigureAwait(false);
+            if (string.IsNullOrWhiteSpace(settings.CrcKey))
                 throw new InvalidOperationException("Przelewy24 CRC key not configured.");
 
-            var sign = await _signatureProvider.CreateVerifySignatureAsync(request, crc).ConfigureAwait(false);
+            var sign = await _signatureProvider.CreateVerifySignatureAsync(request, settings.CrcKey!).ConfigureAwait(false);
             var signedRequest = request with { Sign = sign };
 
-            var client = CreateAuthenticatedClient();
+            var client = await CreateAuthenticatedClientAsync(settings).ConfigureAwait(false);
 
-            var jsonContent = JsonSerializer.Serialize(signedRequest, new JsonSerializerOptions
-            {
-                PropertyNamingPolicy = JsonNamingPolicy.CamelCase
-            });
+            var jsonContent = JsonSerializer.Serialize(signedRequest, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase });
 
             using var content = new StringContent(jsonContent, Encoding.UTF8, "application/json");
             var responseMessage = await client.PutAsync("transaction/verify", content).ConfigureAwait(false);
@@ -273,11 +350,7 @@ namespace OrchardCore.PaymentGateway.Providers.Przelewy24.Services
                 throw new InvalidOperationException($"Przelewy24 verify failed {(int)responseMessage.StatusCode}. Response: {responseContent}");
             }
 
-            var dto = JsonSerializer.Deserialize<VerifyResponseDto>(responseContent, new JsonSerializerOptions
-            {
-                PropertyNameCaseInsensitive = true
-            });
-
+            var dto = JsonSerializer.Deserialize<VerifyResponseDto>(responseContent, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
             return dto ?? throw new InvalidOperationException("Failed to deserialize verify response.");
         }
 
@@ -300,7 +373,9 @@ namespace OrchardCore.PaymentGateway.Providers.Przelewy24.Services
             if (string.IsNullOrWhiteSpace(sessionId))
                 throw new ArgumentException("SessionId is required", nameof(sessionId));
 
-            var client = CreateAuthenticatedClient();
+            var settings = await GetSettingsAsync().ConfigureAwait(false);
+            var client = await CreateAuthenticatedClientAsync(settings).ConfigureAwait(false);
+
             var responseMessage = await client.GetAsync($"transaction/by/sessionId/{sessionId}").ConfigureAwait(false);
             var responseContent = await responseMessage.Content.ReadAsStringAsync().ConfigureAwait(false);
 
@@ -309,11 +384,7 @@ namespace OrchardCore.PaymentGateway.Providers.Przelewy24.Services
                 throw new InvalidOperationException($"Przelewy24 returned {(int)responseMessage.StatusCode}. Response: {responseContent}");
             }
 
-            var dto = JsonSerializer.Deserialize<TransactionDetailsDto>(responseContent, new JsonSerializerOptions
-            {
-                PropertyNameCaseInsensitive = true
-            });
-
+            var dto = JsonSerializer.Deserialize<TransactionDetailsDto>(responseContent, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
             return dto ?? throw new InvalidOperationException("Failed to deserialize transaction details.");
         }
 
@@ -351,12 +422,10 @@ namespace OrchardCore.PaymentGateway.Providers.Przelewy24.Services
         {
             if (request is null) throw new ArgumentNullException(nameof(request));
 
-            var client = CreateAuthenticatedClient();
+            var settings = await GetSettingsAsync().ConfigureAwait(false);
+            var client = await CreateAuthenticatedClientAsync(settings).ConfigureAwait(false);
 
-            var jsonContent = JsonSerializer.Serialize(request, new JsonSerializerOptions
-            {
-                PropertyNamingPolicy = JsonNamingPolicy.CamelCase
-            });
+            var jsonContent = JsonSerializer.Serialize(request, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase });
 
             using var content = new StringContent(jsonContent, Encoding.UTF8, "application/json");
             var responseMessage = await client.PostAsync("transaction/refund", content).ConfigureAwait(false);
@@ -367,11 +436,7 @@ namespace OrchardCore.PaymentGateway.Providers.Przelewy24.Services
                 throw new InvalidOperationException($"Przelewy24 refund failed {(int)responseMessage.StatusCode}. Response: {responseContent}");
             }
 
-            var dto = JsonSerializer.Deserialize<RefundResponseDto>(responseContent, new JsonSerializerOptions
-            {
-                PropertyNameCaseInsensitive = true
-            });
-
+            var dto = JsonSerializer.Deserialize<RefundResponseDto>(responseContent, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
             return dto ?? throw new InvalidOperationException("Failed to deserialize refund response.");
         }
 
@@ -390,7 +455,9 @@ namespace OrchardCore.PaymentGateway.Providers.Przelewy24.Services
         /// </remarks>
         public async Task<RefundDetailsDto> GetRefundByOrderIdAsync(long orderId)
         {
-            var client = CreateAuthenticatedClient();
+            var settings = await GetSettingsAsync().ConfigureAwait(false);
+            var client = await CreateAuthenticatedClientAsync(settings).ConfigureAwait(false);
+
             var responseMessage = await client.GetAsync($"refund/by/orderId/{orderId}").ConfigureAwait(false);
             var responseContent = await responseMessage.Content.ReadAsStringAsync().ConfigureAwait(false);
 
@@ -399,11 +466,7 @@ namespace OrchardCore.PaymentGateway.Providers.Przelewy24.Services
                 throw new InvalidOperationException($"Przelewy24 returned {(int)responseMessage.StatusCode}. Response: {responseContent}");
             }
 
-            var dto = JsonSerializer.Deserialize<RefundDetailsDto>(responseContent, new JsonSerializerOptions
-            {
-                PropertyNameCaseInsensitive = true
-            });
-
+            var dto = JsonSerializer.Deserialize<RefundDetailsDto>(responseContent, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
             return dto ?? throw new InvalidOperationException("Failed to deserialize refund details.");
         }
 
@@ -430,13 +493,12 @@ namespace OrchardCore.PaymentGateway.Providers.Przelewy24.Services
         /// </remarks>
         public async Task<PaymentMethodsResponseDto> GetPaymentMethodsAsync(string lang = "pl", int? amount = null, string currency = "PLN")
         {
-            var client = CreateAuthenticatedClient();
+            var settings = await GetSettingsAsync().ConfigureAwait(false);
+            var client = await CreateAuthenticatedClientAsync(settings).ConfigureAwait(false);
 
             var queryParams = new List<string>();
-            if (amount.HasValue)
-                queryParams.Add($"amount={amount.Value}");
-            if (!string.IsNullOrWhiteSpace(currency))
-                queryParams.Add($"currency={currency}");
+            if (amount.HasValue) queryParams.Add($"amount={amount.Value}");
+            if (!string.IsNullOrWhiteSpace(currency)) queryParams.Add($"currency={currency}");
 
             var query = queryParams.Count > 0 ? "?" + string.Join("&", queryParams) : string.Empty;
             var url = $"payment/methods/{lang}{query}";
@@ -449,11 +511,7 @@ namespace OrchardCore.PaymentGateway.Providers.Przelewy24.Services
                 throw new InvalidOperationException($"Przelewy24 returned {(int)responseMessage.StatusCode}. Response: {responseContent}");
             }
 
-            var dto = JsonSerializer.Deserialize<PaymentMethodsResponseDto>(responseContent, new JsonSerializerOptions
-            {
-                PropertyNameCaseInsensitive = true
-            });
-
+            var dto = JsonSerializer.Deserialize<PaymentMethodsResponseDto>(responseContent, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
             return dto ?? throw new InvalidOperationException("Failed to deserialize payment methods.");
         }
 
@@ -478,7 +536,9 @@ namespace OrchardCore.PaymentGateway.Providers.Przelewy24.Services
         /// </remarks>
         public async Task<CardInfoResponseDto> GetCardInfoAsync(long orderId)
         {
-            var client = CreateAuthenticatedClient();
+            var settings = await GetSettingsAsync().ConfigureAwait(false);
+            var client = await CreateAuthenticatedClientAsync(settings).ConfigureAwait(false);
+
             var responseMessage = await client.GetAsync($"card/info/{orderId}").ConfigureAwait(false);
             var responseContent = await responseMessage.Content.ReadAsStringAsync().ConfigureAwait(false);
 
@@ -487,11 +547,7 @@ namespace OrchardCore.PaymentGateway.Providers.Przelewy24.Services
                 throw new InvalidOperationException($"Przelewy24 returned {(int)responseMessage.StatusCode}. Response: {responseContent}");
             }
 
-            var dto = JsonSerializer.Deserialize<CardInfoResponseDto>(responseContent, new JsonSerializerOptions
-            {
-                PropertyNameCaseInsensitive = true
-            });
-
+            var dto = JsonSerializer.Deserialize<CardInfoResponseDto>(responseContent, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
             return dto ?? throw new InvalidOperationException("Failed to deserialize card info.");
         }
 
@@ -516,7 +572,8 @@ namespace OrchardCore.PaymentGateway.Providers.Przelewy24.Services
             if (string.IsNullOrWhiteSpace(token))
                 throw new ArgumentException("Token is required", nameof(token));
 
-            var client = CreateAuthenticatedClient();
+            var settings = await GetSettingsAsync().ConfigureAwait(false);
+            var client = await CreateAuthenticatedClientAsync(settings).ConfigureAwait(false);
 
             var requestBody = new { token };
             var jsonContent = JsonSerializer.Serialize(requestBody);
@@ -530,11 +587,7 @@ namespace OrchardCore.PaymentGateway.Providers.Przelewy24.Services
                 throw new InvalidOperationException($"Przelewy24 charge failed {(int)responseMessage.StatusCode}. Response: {responseContent}");
             }
 
-            var dto = JsonSerializer.Deserialize<CardChargeWith3dsResponseDto>(responseContent, new JsonSerializerOptions
-            {
-                PropertyNameCaseInsensitive = true
-            });
-
+            var dto = JsonSerializer.Deserialize<CardChargeWith3dsResponseDto>(responseContent, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
             return dto ?? throw new InvalidOperationException("Failed to deserialize charge response.");
         }
 
@@ -566,7 +619,8 @@ namespace OrchardCore.PaymentGateway.Providers.Przelewy24.Services
             if (string.IsNullOrWhiteSpace(token))
                 throw new ArgumentException("Token is required", nameof(token));
 
-            var client = CreateAuthenticatedClient();
+            var settings = await GetSettingsAsync().ConfigureAwait(false);
+            var client = await CreateAuthenticatedClientAsync(settings).ConfigureAwait(false);
 
             var requestBody = new { token };
             var jsonContent = JsonSerializer.Serialize(requestBody);
@@ -580,11 +634,7 @@ namespace OrchardCore.PaymentGateway.Providers.Przelewy24.Services
                 throw new InvalidOperationException($"Przelewy24 charge failed {(int)responseMessage.StatusCode}. Response: {responseContent}");
             }
 
-            var dto = JsonSerializer.Deserialize<CardChargeResponseDto>(responseContent, new JsonSerializerOptions
-            {
-                PropertyNameCaseInsensitive = true
-            });
-
+            var dto = JsonSerializer.Deserialize<CardChargeResponseDto>(responseContent, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
             return dto ?? throw new InvalidOperationException("Failed to deserialize charge response.");
         }
 
@@ -610,12 +660,10 @@ namespace OrchardCore.PaymentGateway.Providers.Przelewy24.Services
         {
             if (request is null) throw new ArgumentNullException(nameof(request));
 
-            var client = CreateAuthenticatedClient();
+            var settings = await GetSettingsAsync().ConfigureAwait(false);
+            var client = await CreateAuthenticatedClientAsync(settings).ConfigureAwait(false);
 
-            var jsonContent = JsonSerializer.Serialize(request, new JsonSerializerOptions
-            {
-                PropertyNamingPolicy = JsonNamingPolicy.CamelCase
-            });
+            var jsonContent = JsonSerializer.Serialize(request, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase });
 
             using var content = new StringContent(jsonContent, Encoding.UTF8, "application/json");
             var responseMessage = await client.PostAsync("card/pay", content).ConfigureAwait(false);
@@ -626,11 +674,7 @@ namespace OrchardCore.PaymentGateway.Providers.Przelewy24.Services
                 throw new InvalidOperationException($"Przelewy24 card pay failed {(int)responseMessage.StatusCode}. Response: {responseContent}");
             }
 
-            var dto = JsonSerializer.Deserialize<CardPayResponseDto>(responseContent, new JsonSerializerOptions
-            {
-                PropertyNameCaseInsensitive = true
-            });
-
+            var dto = JsonSerializer.Deserialize<CardPayResponseDto>(responseContent, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
             return dto ?? throw new InvalidOperationException("Failed to deserialize card pay response.");
         }
 
@@ -668,12 +712,10 @@ namespace OrchardCore.PaymentGateway.Providers.Przelewy24.Services
         {
             if (request is null) throw new ArgumentNullException(nameof(request));
 
-            var client = CreateAuthenticatedClient();
+            var settings = await GetSettingsAsync().ConfigureAwait(false);
+            var client = await CreateAuthenticatedClientAsync(settings).ConfigureAwait(false);
 
-            var jsonContent = JsonSerializer.Serialize(request, new JsonSerializerOptions
-            {
-                PropertyNamingPolicy = JsonNamingPolicy.CamelCase
-            });
+            var jsonContent = JsonSerializer.Serialize(request, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase });
 
             using var content = new StringContent(jsonContent, Encoding.UTF8, "application/json");
             var responseMessage = await client.PostAsync("paymentMethod/blik/chargeByCode", content).ConfigureAwait(false);
@@ -684,11 +726,7 @@ namespace OrchardCore.PaymentGateway.Providers.Przelewy24.Services
                 throw new InvalidOperationException($"BLIK charge failed {(int)responseMessage.StatusCode}. Response: {responseContent}");
             }
 
-            var dto = JsonSerializer.Deserialize<BlikChargeResponseDto>(responseContent, new JsonSerializerOptions
-            {
-                PropertyNameCaseInsensitive = true
-            });
-
+            var dto = JsonSerializer.Deserialize<BlikChargeResponseDto>(responseContent, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
             return dto ?? throw new InvalidOperationException("Failed to deserialize BLIK charge response.");
         }
 
@@ -729,12 +767,10 @@ namespace OrchardCore.PaymentGateway.Providers.Przelewy24.Services
         {
             if (request is null) throw new ArgumentNullException(nameof(request));
 
-            var client = CreateAuthenticatedClient();
+            var settings = await GetSettingsAsync().ConfigureAwait(false);
+            var client = await CreateAuthenticatedClientAsync(settings).ConfigureAwait(false);
 
-            var jsonContent = JsonSerializer.Serialize(request, new JsonSerializerOptions
-            {
-                PropertyNamingPolicy = JsonNamingPolicy.CamelCase
-            });
+            var jsonContent = JsonSerializer.Serialize(request, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase });
 
             using var content = new StringContent(jsonContent, Encoding.UTF8, "application/json");
             var responseMessage = await client.PostAsync("paymentMethod/blik/chargeByAlias", content).ConfigureAwait(false);
@@ -745,11 +781,7 @@ namespace OrchardCore.PaymentGateway.Providers.Przelewy24.Services
                 throw new InvalidOperationException($"BLIK alias charge failed {(int)responseMessage.StatusCode}. Response: {responseContent}");
             }
 
-            var dto = JsonSerializer.Deserialize<BlikChargeResponseDto>(responseContent, new JsonSerializerOptions
-            {
-                PropertyNameCaseInsensitive = true
-            });
-
+            var dto = JsonSerializer.Deserialize<BlikChargeResponseDto>(responseContent, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
             return dto ?? throw new InvalidOperationException("Failed to deserialize BLIK alias charge response.");
         }
 
@@ -783,7 +815,9 @@ namespace OrchardCore.PaymentGateway.Providers.Przelewy24.Services
             if (string.IsNullOrWhiteSpace(email))
                 throw new ArgumentException("Email is required", nameof(email));
 
-            var client = CreateAuthenticatedClient();
+            var settings = await GetSettingsAsync().ConfigureAwait(false);
+            var client = await CreateAuthenticatedClientAsync(settings).ConfigureAwait(false);
+
             var responseMessage = await client.GetAsync($"paymentMethod/blik/getAliasesByEmail/{email}").ConfigureAwait(false);
             var responseContent = await responseMessage.Content.ReadAsStringAsync().ConfigureAwait(false);
 
@@ -792,11 +826,7 @@ namespace OrchardCore.PaymentGateway.Providers.Przelewy24.Services
                 throw new InvalidOperationException($"Przelewy24 returned {(int)responseMessage.StatusCode}. Response: {responseContent}");
             }
 
-            var dto = JsonSerializer.Deserialize<BlikAliasesResponseDto>(responseContent, new JsonSerializerOptions
-            {
-                PropertyNameCaseInsensitive = true
-            });
-
+            var dto = JsonSerializer.Deserialize<BlikAliasesResponseDto>(responseContent, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
             return dto ?? throw new InvalidOperationException("Failed to deserialize BLIK aliases.");
         }
 
@@ -821,7 +851,9 @@ namespace OrchardCore.PaymentGateway.Providers.Przelewy24.Services
             if (string.IsNullOrWhiteSpace(email))
                 throw new ArgumentException("Email is required", nameof(email));
 
-            var client = CreateAuthenticatedClient();
+            var settings = await GetSettingsAsync().ConfigureAwait(false);
+            var client = await CreateAuthenticatedClientAsync(settings).ConfigureAwait(false);
+
             var responseMessage = await client.GetAsync($"paymentMethod/blik/getAliasesByEmail/{email}/custom").ConfigureAwait(false);
             var responseContent = await responseMessage.Content.ReadAsStringAsync().ConfigureAwait(false);
 
@@ -830,11 +862,7 @@ namespace OrchardCore.PaymentGateway.Providers.Przelewy24.Services
                 throw new InvalidOperationException($"Przelewy24 returned {(int)responseMessage.StatusCode}. Response: {responseContent}");
             }
 
-            var dto = JsonSerializer.Deserialize<BlikAliasesResponseDto>(responseContent, new JsonSerializerOptions
-            {
-                PropertyNameCaseInsensitive = true
-            });
-
+            var dto = JsonSerializer.Deserialize<BlikAliasesResponseDto>(responseContent, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
             return dto ?? throw new InvalidOperationException("Failed to deserialize BLIK custom aliases.");
         }
 
@@ -876,7 +904,8 @@ namespace OrchardCore.PaymentGateway.Providers.Przelewy24.Services
             if (string.IsNullOrWhiteSpace(dateTo))
                 throw new ArgumentException("DateTo is required", nameof(dateTo));
 
-            var client = CreateAuthenticatedClient();
+            var settings = await GetSettingsAsync().ConfigureAwait(false);
+            var client = await CreateAuthenticatedClientAsync(settings).ConfigureAwait(false);
 
             var queryParams = new List<string>();
             if (!string.IsNullOrWhiteSpace(type))
@@ -893,11 +922,7 @@ namespace OrchardCore.PaymentGateway.Providers.Przelewy24.Services
                 throw new InvalidOperationException($"Przelewy24 returned {(int)responseMessage.StatusCode}. Response: {responseContent}");
             }
 
-            var dto = JsonSerializer.Deserialize<ReportHistoryResponseDto>(responseContent, new JsonSerializerOptions
-            {
-                PropertyNameCaseInsensitive = true
-            });
-
+            var dto = JsonSerializer.Deserialize<ReportHistoryResponseDto>(responseContent, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
             return dto ?? throw new InvalidOperationException("Failed to deserialize report history.");
         }
 
@@ -942,7 +967,9 @@ namespace OrchardCore.PaymentGateway.Providers.Przelewy24.Services
         /// </remarks>
         public async Task<BatchDetailsResponseDto> GetBatchDetailsAsync(int batchId)
         {
-            var client = CreateAuthenticatedClient();
+            var settings = await GetSettingsAsync().ConfigureAwait(false);
+            var client = await CreateAuthenticatedClientAsync(settings).ConfigureAwait(false);
+
             var responseMessage = await client.GetAsync($"report/batch/details/{batchId}").ConfigureAwait(false);
             var responseContent = await responseMessage.Content.ReadAsStringAsync().ConfigureAwait(false);
 
@@ -951,11 +978,7 @@ namespace OrchardCore.PaymentGateway.Providers.Przelewy24.Services
                 throw new InvalidOperationException($"Przelewy24 returned {(int)responseMessage.StatusCode}. Response: {responseContent}");
             }
 
-            var dto = JsonSerializer.Deserialize<BatchDetailsResponseDto>(responseContent, new JsonSerializerOptions
-            {
-                PropertyNameCaseInsensitive = true
-            });
-
+            var dto = JsonSerializer.Deserialize<BatchDetailsResponseDto>(responseContent, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
             return dto ?? throw new InvalidOperationException("Failed to deserialize batch details.");
         }
 
