@@ -3,10 +3,15 @@ using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using OrchardCore.DisplayManagement.Handlers;
 using OrchardCore.Modules;
+using OrchardCore.Settings;
 using Refit;
 using OrchardCore.PaymentGateway.Providers.Przelewy24.Clients;
 using OrchardCore.PaymentGateway.Providers.Przelewy24.Services;
+using OrchardCore.PaymentGateway.Providers.Przelewy24.Drivers;
+using OrchardCore.Navigation;
+using OrchardCore.Security.Permissions;
 
 namespace OrchardCore.PaymentGateway
 {
@@ -33,9 +38,13 @@ namespace OrchardCore.PaymentGateway
                     client.BaseAddress = new Uri(baseUrl);
                 });
 
+            services.AddScoped<IDisplayDriver<ISite>, Przelewy24SettingsDisplayDriver>();
             services.AddSingleton<IPrzelewy24SignatureProvider, Przelewy24SignatureProvider_Default>();
             services.AddTransient<Przelewy24LoggingHandler>();
             services.AddTransient<Przelewy24Service>();
+
+            services.AddScoped<INavigationProvider, AdminMenu>();
+            services.AddScoped<IPermissionProvider, Permissions>();
         }
 
         public override void Configure(IApplicationBuilder builder, IEndpointRouteBuilder routes, IServiceProvider serviceProvider)
