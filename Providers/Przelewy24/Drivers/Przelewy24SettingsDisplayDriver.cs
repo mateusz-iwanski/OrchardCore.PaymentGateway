@@ -25,15 +25,22 @@ public class Przelewy24SettingsDisplayDriver : SectionDisplayDriver<ISite, Przel
 
         return Initialize<Przelewy24SettingsViewModel>("Przelewy24Settings_Edit", model =>
         {
-            model.ClientId = section.ClientId;
-            model.MerchantId = section.MerchantId;
-            model.PosId = section.PosId;
-            model.CrcKey = section.CrcKey;
-            model.ReportKey = section.ReportKey;
-            model.SecretId = section.SecretId;
-            model.BaseUrl = section.BaseUrl;
-            model.UseSandboxFallbacks = section.UseSandboxFallbacks;
+            model.DefaultAccountKey = section.DefaultAccountKey ?? "default";
+            model.Accounts = (section.Accounts ?? new List<Przelewy24AccountSettings>())
+                .Select(a => new Przelewy24AccountViewModel
+                {
+                    Key = a.Key,
+                    MerchantId = a.MerchantId,
+                    PosId = a.PosId,
+                    CrcKey = a.CrcKey,
+                    ReportKey = a.ReportKey,
+                    SecretId = a.SecretId,
+                    BaseUrl = a.BaseUrl,
+                    UseSandboxFallbacks = a.UseSandboxFallbacks
+                })
+                .ToList();
         })
+        .Prefix("Przelewy24Settings")  // <-- jawny prefix!
         .Location("Content:5")
         .OnGroup(GroupId);
     }
@@ -42,23 +49,31 @@ public class Przelewy24SettingsDisplayDriver : SectionDisplayDriver<ISite, Przel
     {
         if (context.GroupId != GroupId)
         {
-            // Fix: Use the non-obsolete overload with ISite as required
-            return await base.UpdateAsync(context.Updater is ISite site ? site : default!, section, context);
+            return null!;
         }
 
         var model = new Przelewy24SettingsViewModel();
-        await context.Updater.TryUpdateModelAsync(model, Prefix);
+        
+        // Użyj tego samego prefiksu co w Edit
+        await context.Updater.TryUpdateModelAsync(model, "Przelewy24Settings");
 
-        section.ClientId = model.ClientId?.Trim();
-        section.MerchantId = model.MerchantId;
-        section.PosId = model.PosId;
-        section.CrcKey = model.CrcKey?.Trim();
-        section.ReportKey = model.ReportKey?.Trim();
-        section.SecretId = model.SecretId?.Trim();
-        section.BaseUrl = model.BaseUrl?.Trim();
-        section.UseSandboxFallbacks = model.UseSandboxFallbacks;
+        section.DefaultAccountKey = model.DefaultAccountKey?.Trim() ?? "default";
 
-        // Fix: Pass the correct type to Edit
+        section.Accounts = (model.Accounts ?? new List<Przelewy24AccountViewModel>())
+            .Where(a => !string.IsNullOrWhiteSpace(a.Key))
+            .Select(a => new Przelewy24AccountSettings
+            {
+                Key = a.Key!.Trim(),
+                MerchantId = a.MerchantId,
+                PosId = a.PosId,
+                CrcKey = a.CrcKey?.Trim(),
+                ReportKey = a.ReportKey?.Trim(),
+                SecretId = a.SecretId?.Trim(),
+                BaseUrl = a.BaseUrl?.Trim(),
+                UseSandboxFallbacks = a.UseSandboxFallbacks
+            })
+            .ToList();
+
         return Edit(section, context);
     }
 }
