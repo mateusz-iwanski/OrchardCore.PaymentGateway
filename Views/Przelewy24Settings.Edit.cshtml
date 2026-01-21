@@ -2,44 +2,100 @@
 @inject IViewLocalizer T
 @model OrchardCore.PaymentGateway.Providers.Przelewy24.ViewModels.Przelewy24SettingsViewModel
 
-<div class="mb-3">
-    <label asp-for="ClientId" class="form-label">@T["Client / Merchant ID"]</label>
-    <input asp-for="ClientId" class="form-control" autocomplete="off" />
-    <span class="form-text text-muted">@T["Optional string identifier; MerchantId (int) is used for API calls."]</span>
-</div>
+@{
+    Model.Accounts ??= new List<OrchardCore.PaymentGateway.Providers.Przelewy24.ViewModels.Przelewy24AccountViewModel>();
+    if (!Model.Accounts.Any())
+    {
+        Model.Accounts.Add(new OrchardCore.PaymentGateway.Providers.Przelewy24.ViewModels.Przelewy24AccountViewModel
+        {
+            Key = "default",
+            UseSandboxFallbacks = true
+        });
+    }
+}
 
 <div class="mb-3">
-    <label asp-for="MerchantId" class="form-label">@T["Merchant ID"]</label>
-    <input asp-for="MerchantId" class="form-control" />
+    <label asp-for="DefaultAccountKey" class="form-label">@T["Default account key"]</label>
+    <input asp-for="DefaultAccountKey" class="form-control" />
+    <span class="form-text text-muted">@T["Used when no account key is passed to the service."]</span>
 </div>
 
-<div class="mb-3">
-    <label asp-for="PosId" class="form-label">@T["POS ID"]</label>
-    <input asp-for="PosId" class="form-control" />
-</div>
+<table class="table table-striped align-middle">
+    <thead>
+        <tr>
+            <th>@T["Key"]</th>
+            <th>@T["MerchantId"]</th>
+            <th>@T["PosId"]</th>
+            <th>@T["CRC"]</th>
+            <th>@T["Report"]</th>
+            <th>@T["Secret"]</th>
+            <th>@T["BaseUrl"]</th>
+            <th>@T["Sandbox"]</th>
+            <th></th>
+        </tr>
+    </thead>
+    <tbody id="p24-accounts">
+        @for (var i = 0; i < Model.Accounts.Count; i++)
+        {
+            <tr>
+                <td><input name="Przelewy24Settings.Accounts[@i].Key" value="@Model.Accounts[i].Key" class="form-control" /></td>
+                <td><input name="Przelewy24Settings.Accounts[@i].MerchantId" value="@Model.Accounts[i].MerchantId" class="form-control" type="number" /></td>
+                <td><input name="Przelewy24Settings.Accounts[@i].PosId" value="@Model.Accounts[i].PosId" class="form-control" type="number" /></td>
+                <td><input name="Przelewy24Settings.Accounts[@i].CrcKey" value="@Model.Accounts[i].CrcKey" class="form-control" /></td>
+                <td><input name="Przelewy24Settings.Accounts[@i].ReportKey" value="@Model.Accounts[i].ReportKey" class="form-control" /></td>
+                <td><input name="Przelewy24Settings.Accounts[@i].SecretId" value="@Model.Accounts[i].SecretId" class="form-control" /></td>
+                <td><input name="Przelewy24Settings.Accounts[@i].BaseUrl" value="@Model.Accounts[i].BaseUrl" class="form-control" /></td>
+                <td class="text-center">
+                    <input name="Przelewy24Settings.Accounts[@i].UseSandboxFallbacks" type="checkbox" class="form-check-input" @(Model.Accounts[i].UseSandboxFallbacks ? "checked" : "") value="true" />
+                    <input name="Przelewy24Settings.Accounts[@i].UseSandboxFallbacks" type="hidden" value="false" />
+                </td>
+                <td>
+                    <button type="button" class="btn btn-sm btn-danger p24-remove-row">✕</button>
+                </td>
+            </tr>
+        }
+    </tbody>
+</table>
 
-<div class="mb-3">
-    <label asp-for="CrcKey" class="form-label">@T["CRC key"]</label>
-    <input asp-for="CrcKey" class="form-control" autocomplete="off" />
-</div>
+<button type="button" class="btn btn-primary" id="p24-add-row">@T["Add account"]</button>
 
-<div class="mb-3">
-    <label asp-for="ReportKey" class="form-label">@T["Report key"]</label>
-    <input asp-for="ReportKey" class="form-control" autocomplete="off" />
-</div>
+<script at="Foot">
+    document.addEventListener('DOMContentLoaded', function () {
+        var addBtn = document.getElementById('p24-add-row');
+        var tbody = document.getElementById('p24-accounts');
 
-<div class="mb-3">
-    <label asp-for="SecretId" class="form-label">@T["Secret ID"]</label>
-    <input asp-for="SecretId" class="form-control" autocomplete="off" />
-    <span class="form-text text-muted">@T["Optional override; Report key is used when empty."]</span>
-</div>
+        if (addBtn && tbody) {
+            addBtn.addEventListener('click', function () {
+                var index = tbody.querySelectorAll('tr').length;
+                var row = document.createElement('tr');
+                row.innerHTML =
+                    '<td><input name="Przelewy24Settings.Accounts[' + index + '].Key" class="form-control" /></td>' +
+                    '<td><input name="Przelewy24Settings.Accounts[' + index + '].MerchantId" class="form-control" type="number" /></td>' +
+                    '<td><input name="Przelewy24Settings.Accounts[' + index + '].PosId" class="form-control" type="number" /></td>' +
+                    '<td><input name="Przelewy24Settings.Accounts[' + index + '].CrcKey" class="form-control" /></td>' +
+                    '<td><input name="Przelewy24Settings.Accounts[' + index + '].ReportKey" class="form-control" /></td>' +
+                    '<td><input name="Przelewy24Settings.Accounts[' + index + '].SecretId" class="form-control" /></td>' +
+                    '<td><input name="Przelewy24Settings.Accounts[' + index + '].BaseUrl" class="form-control" /></td>' +
+                    '<td class="text-center"><input name="Przelewy24Settings.Accounts[' + index + '].UseSandboxFallbacks" type="checkbox" class="form-check-input" checked value="true" /><input name="Przelewy24Settings.Accounts[' + index + '].UseSandboxFallbacks" type="hidden" value="false" /></td>' +
+                    '<td><button type="button" class="btn btn-sm btn-danger p24-remove-row">✕</button></td>';
+                tbody.appendChild(row);
+            });
 
-<div class="mb-3">
-    <label asp-for="BaseUrl" class="form-label">@T["API base URL"]</label>
-    <input asp-for="BaseUrl" class="form-control" placeholder="https://sandbox.przelewy24.pl/api/v1/" />
-</div>
-
-<div class="form-check mb-3">
-    <input asp-for="UseSandboxFallbacks" class="form-check-input" />
-    <label asp-for="UseSandboxFallbacks" class="form-check-label">@T["Use sandbox defaults when empty"]</label>
-</div>
+            tbody.addEventListener('click', function (e) {
+                if (e.target.classList.contains('p24-remove-row')) {
+                    e.target.closest('tr').remove();
+                    // Reindex rows
+                    var rows = tbody.querySelectorAll('tr');
+                    rows.forEach(function (row, idx) {
+                        row.querySelectorAll('input').forEach(function (input) {
+                            var name = input.name;
+                            if (name) {
+                                input.name = name.replace(/Accounts\[\d+\]/, 'Accounts[' + idx + ']');
+                            }
+                        });
+                    });
+                }
+            });
+        }
+    });
+</script>
