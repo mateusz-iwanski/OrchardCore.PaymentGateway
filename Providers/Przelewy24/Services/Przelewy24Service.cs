@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Net.Http;
 using System.Text;
 using System.Text.Json;
@@ -96,65 +97,56 @@ namespace OrchardCore.PaymentGateway.Providers.Przelewy24.Services
                 siteSettings = site.As<Przelewy24Settings>();
             }
 
-            var merchantId = siteSettings?.MerchantId
-                             ?? _configuration.GetValue<int?>("Przelewy24:MerchantId")
-                             ?? _configuration.GetValue<int?>("Przelewy24:ClientId");
+            var settings = siteSettings ?? new Przelewy24Settings();
+            settings.DefaultAccountKey ??= "default";
+            settings.Accounts ??= new List<Przelewy24AccountSettings>();
 
-            var posId = siteSettings?.PosId
-                        ?? _configuration.GetValue<int?>("Przelewy24:PosId")
-                        ?? merchantId;
+            var cfgMerchantId = _configuration.GetValue<int?>("Przelewy24:MerchantId")
+                               ?? _configuration.GetValue<int?>("Przelewy24:ClientId");
+            var cfgPosId = _configuration.GetValue<int?>("Przelewy24:PosId") ?? cfgMerchantId;
+            var cfgCrc = _configuration["Przelewy24:CrcKey"];
+            var cfgReportKey = _configuration["Przelewy24:ReportKey"];
+            var cfgSecretId = _configuration["Przelewy24:SecretId"];
+            var cfgBaseUrl = _configuration["Przelewy24:BaseUrl"];
 
-            var crc = string.IsNullOrWhiteSpace(siteSettings?.CrcKey)
-                ? _configuration["Przelewy24:CrcKey"]
-                : siteSettings!.CrcKey;
-
-            var reportKey = string.IsNullOrWhiteSpace(siteSettings?.ReportKey)
-                ? _configuration["Przelewy24:ReportKey"]
-                : siteSettings!.ReportKey;
-
-            var secretId = string.IsNullOrWhiteSpace(siteSettings?.SecretId)
-                ? _configuration["Przelewy24:SecretId"]
-                : siteSettings!.SecretId;
-
-            var baseUrl = string.IsNullOrWhiteSpace(siteSettings?.BaseUrl)
-                ? _configuration["Przelewy24:BaseUrl"]
-                : siteSettings!.BaseUrl;
-
-            var useSandbox = siteSettings?.UseSandboxFallbacks ?? true;
-
-            return new Przelewy24Settings
+            if (!settings.Accounts.Any())
             {
-                ClientId = siteSettings?.ClientId ?? _configuration["Przelewy24:ClientId"],
-                MerchantId = merchantId,
-                PosId = posId,
-                CrcKey = !string.IsNullOrWhiteSpace(crc) ? crc : (useSandbox ? SandboxCrcKey : null),
-                ReportKey = !string.IsNullOrWhiteSpace(reportKey) ? reportKey : (useSandbox ? SandboxReportKey : null),
-                SecretId = !string.IsNullOrWhiteSpace(secretId) ? secretId : null,
-                BaseUrl = !string.IsNullOrWhiteSpace(baseUrl) ? EnsureTrailingSlash(baseUrl) : EnsureTrailingSlash(SandboxBaseUrl),
-                UseSandboxFallbacks = useSandbox
-            };
+                settings.Accounts.Add(new Przelewy24AccountSettings
+                {
+                    Key = settings.DefaultAccountKey,
+                    MerchantId = cfgMerchantId,
+                    PosId = cfgPosId,
+                    CrcKey = !string.IsNullOrWhiteSpace(cfgCrc) ? cfgCrc : SandboxCrcKey,
+                    ReportKey = !string.IsNullOrWhiteSpace(cfgReportKey) ? cfgReportKey : SandboxReportKey,
+                    SecretId = cfgSecretId,
+                    BaseUrl = EnsureTrailingSlash(!string.IsNullOrWhiteSpace(cfgBaseUrl) ? cfgBaseUrl : SandboxBaseUrl),
+                    UseSandboxFallbacks = true
+                });
+            }
+
+            foreach (var acc in settings.Accounts.Where(a => string.IsNullOrWhiteSpace(a.BaseUrl) && a.UseSandboxFallbacks))
+            {
+                acc.BaseUrl = EnsureTrailingSlash(SandboxBaseUrl);
+            }
+
+            return settings;
         }
 
         private static string EnsureTrailingSlash(string url) =>
             url.EndsWith('/') ? url : url + "/";
 
-        private async Task<HttpClient> CreateAuthenticatedClientAsync(Przelewy24Settings settings)
+        private async Task<(Przelewy24AccountSettings account, Przelewy24Settings settings)> ResolveAccountAsync(string? accountKey)
         {
-            var client = _httpClientFactory.CreateClient("Przelewy24");
-            client.BaseAddress ??= new Uri(settings.BaseUrl ?? SandboxBaseUrl);
+            var settings = await GetSettingsAsync().ConfigureAwait(false);
+            var key = accountKey ?? settings.DefaultAccountKey ?? "default";
 
-            var reportKey = settings.SecretId ?? settings.ReportKey ?? throw new InvalidOperationException("Przelewy24:ReportKey/SecretId not configured.");
-            var posId = settings.PosId?.ToString() ?? settings.MerchantId?.ToString();
+            var account = settings.Accounts.FirstOrDefault(x => string.Equals(x.Key, key, StringComparison.OrdinalIgnoreCase))
+                          ?? settings.Accounts.FirstOrDefault();
 
-            if (string.IsNullOrWhiteSpace(posId))
-            {
-                throw new InvalidOperationException("Przelewy24:PosId or MerchantId not configured.");
-            }
+            if (account is null)
+                throw new InvalidOperationException($"No Przelewy24 account configured for key '{key}'.");
 
-            var authBytes = Encoding.UTF8.GetBytes($"{posId}:{reportKey}");
-            client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Basic", Convert.ToBase64String(authBytes));
-
-            return client;
+            return (account, settings);
         }
 
         #endregion
@@ -179,10 +171,10 @@ namespace OrchardCore.PaymentGateway.Providers.Przelewy24.Services
         /// </remarks>
         public async Task<string> TestAccessAsync(string? posId = null, string? secretId = null)
         {
-            var settings = await GetSettingsAsync().ConfigureAwait(false);
+            var (account, _) = await ResolveAccountAsync(null).ConfigureAwait(false);
 
-            var cfgPosId = posId ?? settings.PosId?.ToString() ?? settings.MerchantId?.ToString();
-            var cfgSecret = secretId ?? settings.SecretId ?? settings.ReportKey;
+            var cfgPosId = posId ?? account.PosId?.ToString() ?? account.MerchantId?.ToString();
+            var cfgSecret = secretId ?? account.SecretId ?? account.ReportKey;
 
             if (string.IsNullOrWhiteSpace(cfgPosId))
                 throw new InvalidOperationException("PosId not configured and not provided.");
@@ -190,7 +182,7 @@ namespace OrchardCore.PaymentGateway.Providers.Przelewy24.Services
             if (string.IsNullOrWhiteSpace(cfgSecret))
                 throw new InvalidOperationException("SecretId/ReportKey not configured and not provided.");
 
-            var client = await CreateAuthenticatedClientAsync(settings).ConfigureAwait(false);
+            var client = await CreateAuthenticatedClientAsync(account).ConfigureAwait(false);
             var authBytes = Encoding.UTF8.GetBytes($"{cfgPosId}:{cfgSecret}");
             var authHeader = Convert.ToBase64String(authBytes);
 
@@ -240,49 +232,43 @@ namespace OrchardCore.PaymentGateway.Providers.Przelewy24.Services
         /// 
         /// <b>Important:</b> Amount must be in grosze (1 PLN = 100 grosze)
         /// </remarks>
-        public async Task<RegisterResponseDto> CreateTransactionAsync(RegisterRequestDto request)
+        public async Task<RegisterResponseDto> CreateTransactionAsync(RegisterRequestDto request, string? accountKey = null)
         {
             if (request is null) throw new ArgumentNullException(nameof(request));
 
-            var settings = await GetSettingsAsync().ConfigureAwait(false);
+            var (account, _) = await ResolveAccountAsync(accountKey).ConfigureAwait(false);
 
-            if (settings.MerchantId is null)
-                throw new InvalidOperationException("Przelewy24 MerchantId not configured.");
-            if (settings.PosId is null)
-                throw new InvalidOperationException("Przelewy24 PosId not configured.");
-            if (string.IsNullOrWhiteSpace(settings.CrcKey))
+            if (string.IsNullOrWhiteSpace(account.CrcKey))
                 throw new InvalidOperationException("Przelewy24 CRC key not configured.");
 
-            if (string.IsNullOrWhiteSpace(request.SessionId))
+            var normalized = request with
             {
-                request = request with { SessionId = Guid.NewGuid().ToString("N") };
-            }
-
-            var normalizedRequest = request with
-            {
-                MerchantId = request.MerchantId == 0 ? settings.MerchantId.Value : request.MerchantId,
-                PosId = request.PosId == 0 ? settings.PosId.Value : request.PosId
+                MerchantId = request.MerchantId == 0 ? account.MerchantId ?? 0 : request.MerchantId,
+                PosId = request.PosId == 0 ? account.PosId ?? account.MerchantId ?? 0 : request.PosId
             };
 
-            var sign = await _signatureProvider.CreateRegisterSignatureAsync(normalizedRequest, settings.CrcKey!).ConfigureAwait(false);
-            var signedRequest = normalizedRequest with { Sign = sign };
+            if (string.IsNullOrWhiteSpace(normalized.SessionId))
+                normalized = normalized with { SessionId = Guid.NewGuid().ToString("N") };
 
-            var client = await CreateAuthenticatedClientAsync(settings).ConfigureAwait(false);
+            var sign = await _signatureProvider.CreateRegisterSignatureAsync(normalized, account.CrcKey!).ConfigureAwait(false);
+            var signed = normalized with { Sign = sign };
+
+            var client = await CreateAuthenticatedClientAsync(accountKey).ConfigureAwait(false);
 
             var form = new Dictionary<string, string?>
             {
-                ["merchantId"] = signedRequest.MerchantId.ToString(),
-                ["posId"] = signedRequest.PosId.ToString(),
-                ["amount"] = signedRequest.Amount.ToString(),
-                ["currency"] = signedRequest.Currency,
-                ["description"] = signedRequest.Description,
-                ["email"] = signedRequest.Email,
-                ["country"] = signedRequest.Country,
-                ["language"] = signedRequest.Language,
-                ["urlReturn"] = signedRequest.UrlReturn,
-                ["urlStatus"] = signedRequest.UrlStatus,
-                ["sessionId"] = signedRequest.SessionId,
-                ["sign"] = signedRequest.Sign
+                ["merchantId"] = signed.MerchantId.ToString(),
+                ["posId"] = signed.PosId.ToString(),
+                ["amount"] = signed.Amount.ToString(),
+                ["currency"] = signed.Currency,
+                ["description"] = signed.Description,
+                ["email"] = signed.Email,
+                ["country"] = signed.Country,
+                ["language"] = signed.Language,
+                ["urlReturn"] = signed.UrlReturn,
+                ["urlStatus"] = signed.UrlStatus,
+                ["sessionId"] = signed.SessionId,
+                ["sign"] = signed.Sign
             };
 
             using var content = new FormUrlEncodedContent(form);
@@ -330,14 +316,14 @@ namespace OrchardCore.PaymentGateway.Providers.Przelewy24.Services
         {
             if (request is null) throw new ArgumentNullException(nameof(request));
 
-            var settings = await GetSettingsAsync().ConfigureAwait(false);
-            if (string.IsNullOrWhiteSpace(settings.CrcKey))
+            var (account, _) = await ResolveAccountAsync(null).ConfigureAwait(false);
+            if (string.IsNullOrWhiteSpace(account.CrcKey))
                 throw new InvalidOperationException("Przelewy24 CRC key not configured.");
 
-            var sign = await _signatureProvider.CreateVerifySignatureAsync(request, settings.CrcKey!).ConfigureAwait(false);
+            var sign = await _signatureProvider.CreateVerifySignatureAsync(request, account.CrcKey!).ConfigureAwait(false);
             var signedRequest = request with { Sign = sign };
 
-            var client = await CreateAuthenticatedClientAsync(settings).ConfigureAwait(false);
+            var client = await CreateAuthenticatedClientAsync(account).ConfigureAwait(false);
 
             var jsonContent = JsonSerializer.Serialize(signedRequest, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase });
 
@@ -373,8 +359,8 @@ namespace OrchardCore.PaymentGateway.Providers.Przelewy24.Services
             if (string.IsNullOrWhiteSpace(sessionId))
                 throw new ArgumentException("SessionId is required", nameof(sessionId));
 
-            var settings = await GetSettingsAsync().ConfigureAwait(false);
-            var client = await CreateAuthenticatedClientAsync(settings).ConfigureAwait(false);
+            var (account, _) = await ResolveAccountAsync(null).ConfigureAwait(false);
+            var client = await CreateAuthenticatedClientAsync(account).ConfigureAwait(false);
 
             var responseMessage = await client.GetAsync($"transaction/by/sessionId/{sessionId}").ConfigureAwait(false);
             var responseContent = await responseMessage.Content.ReadAsStringAsync().ConfigureAwait(false);
@@ -422,8 +408,8 @@ namespace OrchardCore.PaymentGateway.Providers.Przelewy24.Services
         {
             if (request is null) throw new ArgumentNullException(nameof(request));
 
-            var settings = await GetSettingsAsync().ConfigureAwait(false);
-            var client = await CreateAuthenticatedClientAsync(settings).ConfigureAwait(false);
+            var (account, _) = await ResolveAccountAsync(null).ConfigureAwait(false);
+            var client = await CreateAuthenticatedClientAsync(account).ConfigureAwait(false);
 
             var jsonContent = JsonSerializer.Serialize(request, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase });
 
@@ -455,8 +441,8 @@ namespace OrchardCore.PaymentGateway.Providers.Przelewy24.Services
         /// </remarks>
         public async Task<RefundDetailsDto> GetRefundByOrderIdAsync(long orderId)
         {
-            var settings = await GetSettingsAsync().ConfigureAwait(false);
-            var client = await CreateAuthenticatedClientAsync(settings).ConfigureAwait(false);
+            var (account, _) = await ResolveAccountAsync(null).ConfigureAwait(false);
+            var client = await CreateAuthenticatedClientAsync(account).ConfigureAwait(false);
 
             var responseMessage = await client.GetAsync($"refund/by/orderId/{orderId}").ConfigureAwait(false);
             var responseContent = await responseMessage.Content.ReadAsStringAsync().ConfigureAwait(false);
@@ -493,8 +479,8 @@ namespace OrchardCore.PaymentGateway.Providers.Przelewy24.Services
         /// </remarks>
         public async Task<PaymentMethodsResponseDto> GetPaymentMethodsAsync(string lang = "pl", int? amount = null, string currency = "PLN")
         {
-            var settings = await GetSettingsAsync().ConfigureAwait(false);
-            var client = await CreateAuthenticatedClientAsync(settings).ConfigureAwait(false);
+            var (account, _) = await ResolveAccountAsync(null).ConfigureAwait(false);
+            var client = await CreateAuthenticatedClientAsync(account).ConfigureAwait(false);
 
             var queryParams = new List<string>();
             if (amount.HasValue) queryParams.Add($"amount={amount.Value}");
@@ -536,8 +522,8 @@ namespace OrchardCore.PaymentGateway.Providers.Przelewy24.Services
         /// </remarks>
         public async Task<CardInfoResponseDto> GetCardInfoAsync(long orderId)
         {
-            var settings = await GetSettingsAsync().ConfigureAwait(false);
-            var client = await CreateAuthenticatedClientAsync(settings).ConfigureAwait(false);
+            var (account, _) = await ResolveAccountAsync(null).ConfigureAwait(false);
+            var client = await CreateAuthenticatedClientAsync(account).ConfigureAwait(false);
 
             var responseMessage = await client.GetAsync($"card/info/{orderId}").ConfigureAwait(false);
             var responseContent = await responseMessage.Content.ReadAsStringAsync().ConfigureAwait(false);
@@ -572,8 +558,8 @@ namespace OrchardCore.PaymentGateway.Providers.Przelewy24.Services
             if (string.IsNullOrWhiteSpace(token))
                 throw new ArgumentException("Token is required", nameof(token));
 
-            var settings = await GetSettingsAsync().ConfigureAwait(false);
-            var client = await CreateAuthenticatedClientAsync(settings).ConfigureAwait(false);
+            var (account, _) = await ResolveAccountAsync(null).ConfigureAwait(false);
+            var client = await CreateAuthenticatedClientAsync(account).ConfigureAwait(false);
 
             var requestBody = new { token };
             var jsonContent = JsonSerializer.Serialize(requestBody);
@@ -619,8 +605,8 @@ namespace OrchardCore.PaymentGateway.Providers.Przelewy24.Services
             if (string.IsNullOrWhiteSpace(token))
                 throw new ArgumentException("Token is required", nameof(token));
 
-            var settings = await GetSettingsAsync().ConfigureAwait(false);
-            var client = await CreateAuthenticatedClientAsync(settings).ConfigureAwait(false);
+            var (account, _) = await ResolveAccountAsync(null).ConfigureAwait(false);
+            var client = await CreateAuthenticatedClientAsync(account).ConfigureAwait(false);
 
             var requestBody = new { token };
             var jsonContent = JsonSerializer.Serialize(requestBody);
@@ -660,8 +646,8 @@ namespace OrchardCore.PaymentGateway.Providers.Przelewy24.Services
         {
             if (request is null) throw new ArgumentNullException(nameof(request));
 
-            var settings = await GetSettingsAsync().ConfigureAwait(false);
-            var client = await CreateAuthenticatedClientAsync(settings).ConfigureAwait(false);
+            var (account, _) = await ResolveAccountAsync(null).ConfigureAwait(false);
+            var client = await CreateAuthenticatedClientAsync(account).ConfigureAwait(false);
 
             var jsonContent = JsonSerializer.Serialize(request, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase });
 
@@ -712,8 +698,8 @@ namespace OrchardCore.PaymentGateway.Providers.Przelewy24.Services
         {
             if (request is null) throw new ArgumentNullException(nameof(request));
 
-            var settings = await GetSettingsAsync().ConfigureAwait(false);
-            var client = await CreateAuthenticatedClientAsync(settings).ConfigureAwait(false);
+            var (account, _) = await ResolveAccountAsync(null).ConfigureAwait(false);
+            var client = await CreateAuthenticatedClientAsync(account).ConfigureAwait(false);
 
             var jsonContent = JsonSerializer.Serialize(request, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase });
 
@@ -767,8 +753,8 @@ namespace OrchardCore.PaymentGateway.Providers.Przelewy24.Services
         {
             if (request is null) throw new ArgumentNullException(nameof(request));
 
-            var settings = await GetSettingsAsync().ConfigureAwait(false);
-            var client = await CreateAuthenticatedClientAsync(settings).ConfigureAwait(false);
+            var (account, _) = await ResolveAccountAsync(null).ConfigureAwait(false);
+            var client = await CreateAuthenticatedClientAsync(account).ConfigureAwait(false);
 
             var jsonContent = JsonSerializer.Serialize(request, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase });
 
@@ -815,8 +801,8 @@ namespace OrchardCore.PaymentGateway.Providers.Przelewy24.Services
             if (string.IsNullOrWhiteSpace(email))
                 throw new ArgumentException("Email is required", nameof(email));
 
-            var settings = await GetSettingsAsync().ConfigureAwait(false);
-            var client = await CreateAuthenticatedClientAsync(settings).ConfigureAwait(false);
+            var (account, _) = await ResolveAccountAsync(null).ConfigureAwait(false);
+            var client = await CreateAuthenticatedClientAsync(account).ConfigureAwait(false);
 
             var responseMessage = await client.GetAsync($"paymentMethod/blik/getAliasesByEmail/{email}").ConfigureAwait(false);
             var responseContent = await responseMessage.Content.ReadAsStringAsync().ConfigureAwait(false);
@@ -851,8 +837,8 @@ namespace OrchardCore.PaymentGateway.Providers.Przelewy24.Services
             if (string.IsNullOrWhiteSpace(email))
                 throw new ArgumentException("Email is required", nameof(email));
 
-            var settings = await GetSettingsAsync().ConfigureAwait(false);
-            var client = await CreateAuthenticatedClientAsync(settings).ConfigureAwait(false);
+            var (account, _) = await ResolveAccountAsync(null).ConfigureAwait(false);
+            var client = await CreateAuthenticatedClientAsync(account).ConfigureAwait(false);
 
             var responseMessage = await client.GetAsync($"paymentMethod/blik/getAliasesByEmail/{email}/custom").ConfigureAwait(false);
             var responseContent = await responseMessage.Content.ReadAsStringAsync().ConfigureAwait(false);
@@ -904,8 +890,8 @@ namespace OrchardCore.PaymentGateway.Providers.Przelewy24.Services
             if (string.IsNullOrWhiteSpace(dateTo))
                 throw new ArgumentException("DateTo is required", nameof(dateTo));
 
-            var settings = await GetSettingsAsync().ConfigureAwait(false);
-            var client = await CreateAuthenticatedClientAsync(settings).ConfigureAwait(false);
+            var (account, _) = await ResolveAccountAsync(null).ConfigureAwait(false);
+            var client = await CreateAuthenticatedClientAsync(account).ConfigureAwait(false);
 
             var queryParams = new List<string>();
             if (!string.IsNullOrWhiteSpace(type))
@@ -967,8 +953,8 @@ namespace OrchardCore.PaymentGateway.Providers.Przelewy24.Services
         /// </remarks>
         public async Task<BatchDetailsResponseDto> GetBatchDetailsAsync(int batchId)
         {
-            var settings = await GetSettingsAsync().ConfigureAwait(false);
-            var client = await CreateAuthenticatedClientAsync(settings).ConfigureAwait(false);
+            var (account, _) = await ResolveAccountAsync(null).ConfigureAwait(false);
+            var client = await CreateAuthenticatedClientAsync(account).ConfigureAwait(false);
 
             var responseMessage = await client.GetAsync($"report/batch/details/{batchId}").ConfigureAwait(false);
             var responseContent = await responseMessage.Content.ReadAsStringAsync().ConfigureAwait(false);
@@ -1018,6 +1004,37 @@ namespace OrchardCore.PaymentGateway.Providers.Przelewy24.Services
 
             var authBytes = Encoding.UTF8.GetBytes($"{posId}:{reportKey}");
             client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Basic", Convert.ToBase64String(authBytes));
+
+            return client;
+        }
+
+        private async Task<HttpClient> CreateAuthenticatedClientAsync(string? accountKey = null)
+        {
+            var (account, _) = await ResolveAccountAsync(accountKey).ConfigureAwait(false);
+            return CreateAuthenticatedClient(account);
+        }
+
+        private Task<HttpClient> CreateAuthenticatedClientAsync(Przelewy24AccountSettings account) =>
+            Task.FromResult(CreateAuthenticatedClient(account));
+
+        private HttpClient CreateAuthenticatedClient(Przelewy24AccountSettings account)
+        {
+            var client = _httpClientFactory.CreateClient("Przelewy24");
+
+            var posId = account.PosId ?? account.MerchantId;
+            if (!posId.HasValue)
+                throw new InvalidOperationException("Przelewy24 PosId or MerchantId not configured.");
+
+            var reportKey = account.ReportKey ?? (account.UseSandboxFallbacks ? SandboxReportKey : null);
+            if (string.IsNullOrWhiteSpace(reportKey))
+                throw new InvalidOperationException("Przelewy24 ReportKey not configured.");
+
+            var baseUrl = EnsureTrailingSlash(account.BaseUrl ?? (account.UseSandboxFallbacks ? SandboxBaseUrl : null)
+                           ?? throw new InvalidOperationException("Przelewy24 BaseUrl not configured."));
+
+            var authBytes = Encoding.UTF8.GetBytes($"{posId}:{reportKey}");
+            client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Basic", Convert.ToBase64String(authBytes));
+            client.BaseAddress = new Uri(baseUrl);
 
             return client;
         }
